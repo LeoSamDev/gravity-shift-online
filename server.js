@@ -1,51 +1,110 @@
 'use strict';
-const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
-const {WebSocketServer,WebSocket}=require('ws');
-const PORT=Number(process.env.PORT||3000),ROOT=path.join(__dirname,'public');
-const COLORS=['#52e0ff','#ff6b9a','#ffd166','#92f48d'],SPEED=220,GRAVITY=1050,FLIP=420,PLAYER_X=140,SIZE=23,H=450;
-const rooms=new Map();let idCounter=1;
-const server=http.createServer((req,res)=>{let u;try{u=new URL(req.url,'http://localhost')}catch{res.writeHead(400);return res.end()}
-if(u.pathname==='/healthz'){res.writeHead(200,{'Content-Type':'text/plain'});return res.end('ok')}
-let p=u.pathname==='/'?'/index.html':u.pathname,file=path.resolve(ROOT,'.'+p);if(!file.startsWith(ROOT+path.sep)){res.writeHead(403);return res.end()}
-fs.readFile(file,(e,data)=>{if(e){res.writeHead(404);return res.end('Not found')}res.setHeader('Content-Type',file.endsWith('.html')?'text/html; charset=utf-8':file.endsWith('.js')?'application/javascript':'text/plain');res.end(data)})});
-const wss=new WebSocketServer({server,maxPayload:2048});
-const safeSend=(ws,data)=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(data))};
-const sendRoom=(room,data)=>room.players.forEach(p=>safeSend(p.ws,data));
-const code=()=>{let s;do{s=Array.from({length:5},()=> 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random()*32)]).join('')}while(rooms.has(s));return s};
-function level(){let obs=[];for(let i=0;i<150;i++){let x=620+i*255,type=i%8;
-if(type===0)obs.push({x,y:0,w:42,h:140,kind:'wall'});
-else if(type===1)obs.push({x,y:310,w:42,h:140,kind:'wall'});
-else if(type===2)obs.push({x,y:0,w:45,h:75,kind:'spike'},{x:x+100,y:375,w:45,h:75,kind:'spike'});
-else if(type===3)obs.push({x,y:160,w:40,h:130,kind:'wall'});
-else if(type===4)obs.push({x,y:375,w:65,h:75,kind:'spike'});
-else if(type===5)obs.push({x,y:0,w:55,h:180,kind:'wall'});
-else if(type===6)obs.push({x,y:310,w:52,h:70,kind:'wall'});
-else obs.push({x,y:0,w:60,h:70,kind:'spike'},{x:x+100,y:380,w:48,h:70,kind:'spike'});
-}return obs}
-function lobby(room){sendRoom(room,{type:'lobby',code:room.code,host:room.players[0]?.id,players:room.players.map(p=>({id:p.id,name:p.name,color:p.color,alive:p.alive,score:p.score})),state:room.state})}
-function reset(room){room.state='playing';room.distance=0;room.obstacles=level();for(let p of room.players){Object.assign(p,{x:PLAYER_X,y:427,v:0,gravity:1,alive:true,score:0,flip:false})}sendRoom(room,{type:'start',obstacles:room.obstacles})}
-function disconnect(ws){let room=ws.room;if(!room)return;room.players=room.players.filter(p=>p.ws!==ws);ws.room=null;ws.player=null;if(!room.players.length)rooms.delete(room.code);else{if(room.state==='playing'&&room.players.every(p=>!p.alive))room.state='ended';lobby(room)}}
-wss.on('connection',ws=>{ws.on('message',raw=>{let msg;try{msg=JSON.parse(raw)}catch{return}if(!msg||typeof msg.type!=='string')return;
-if(msg.type==='create'||msg.type==='join'){let name=String(msg.name||'').trim().slice(0,18);if(!name)return safeSend(ws,{type:'error',message:'Ingresá un apodo.'});let room;
-if(msg.type==='create'){room={code:code(),players:[],state:'lobby',obstacles:[],distance:0};rooms.set(room.code,room)}else{room=rooms.get(String(msg.code||'').toUpperCase().trim());if(!room)return safeSend(ws,{type:'error',message:'No existe esa sala.'});if(room.state!=='lobby')return safeSend(ws,{type:'error',message:'La partida ya comenzó.'});if(room.players.length>=4)return safeSend(ws,{type:'error',message:'Sala llena.'})}
-disconnect(ws);const used=new Set(room.players.map(p=>p.color));let p={id:idCounter++,ws,name,color:COLORS.find(c=>!used.has(c))||COLORS[0],x:PLAYER_X,y:427,v:0,gravity:1,alive:true,score:0,flip:false};room.players.push(p);ws.room=room;ws.player=p;safeSend(ws,{type:'joined',id:p.id,code:room.code});lobby(room)}
-else if(msg.type==='start'){let room=ws.room;if(room&&room.players[0]?.ws===ws&&room.state==='lobby')reset(room)}
-else if(msg.type==='flip'){if(ws.room?.state==='playing'&&ws.player?.alive)ws.player.flip=true}
-else if(msg.type==='again'){let room=ws.room;if(room&&room.players[0]?.ws===ws&&room.state==='ended'){room.state='lobby';lobby(room)}}
-});ws.on('close',()=>disconnect(ws));ws.on('error',()=>disconnect(ws))});
-function updatePlayer(p,room,dt){if(!p.alive)return;if(p.flip){p.gravity*=-1;p.v=p.gravity*FLIP;p.flip=false}
-const oldX=p.x,oldY=p.y;p.x+=SPEED*dt;p.v+=p.gravity*GRAVITY*dt;p.y+=p.v*dt;
-if(p.y<=8){p.y=8;if(p.v<0)p.v=0}if(p.y>=H-SIZE-8){p.y=H-SIZE-8;if(p.v>0)p.v=0}
-for(let o of room.obstacles){if(o.x>p.x+SIZE+4)break;if(o.x+o.w<p.x-4)continue;
-if(p.x>=o.x+o.w||p.x+SIZE<=o.x||p.y>=o.y+o.h||p.y+SIZE<=o.y)continue;
-if(o.kind==='spike'){p.alive=false;break}
-const above=oldY+SIZE<=o.y&&p.y+SIZE>=o.y,below=oldY>=o.y+o.h&&p.y<=o.y+o.h;
-const left=oldX+SIZE<=o.x&&p.x+SIZE>=o.x,right=oldX>=o.x+o.w&&p.x<=o.x+o.w;
-if(above){p.y=o.y-SIZE;p.v=0}else if(below){p.y=o.y+o.h;p.v=0}else if(left||right){p.alive=false;break}else{p.alive=false;break}
-}p.score=Math.max(0,Math.floor((p.x-PLAYER_X)/10))}
-let last=Date.now();setInterval(()=>{let now=Date.now(),dt=Math.min((now-last)/1000,.05);last=now;for(let room of rooms.values()){if(room.state!=='playing')continue;
-for(let p of room.players)updatePlayer(p,room,dt);room.distance=Math.max(0,...room.players.map(p=>p.x-PLAYER_X));
-sendRoom(room,{type:'tick',distance:room.distance,players:room.players.map(p=>({id:p.id,y:p.y,gravity:p.gravity,alive:p.alive,score:p.score}))});
-if(room.players.every(p=>!p.alive)){room.state='ended';sendRoom(room,{type:'ended',ranking:room.players.map(p=>({name:p.name,score:p.score,color:p.color})).sort((a,b)=>b.score-a.score)});lobby(room)}
-}},33);
-server.listen(PORT,'0.0.0.0',()=>console.log('Gravity Shift Online: http://localhost:'+PORT));
+const http=require('node:http');
+const fs=require('node:fs');
+const path=require('node:path');
+const WebSocket=require('ws');
+const E=require('./public/engine');
+const ROOT=path.resolve(__dirname,'public');
+const PORT=Number(process.env.PORT||3000);
+const rooms=new Map();let uid=1,seed=1;
+const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.webp':'image/webp','.png':'image/png','.svg':'image/svg+xml'};
+const httpServer=http.createServer((req,res)=>{
+ let pathname;try{pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname);}catch{res.writeHead(400);return res.end('Bad URL');}
+ if(pathname==='/healthz'){res.writeHead(200,{'Content-Type':'text/plain'});return res.end('OK');}
+ const target=path.resolve(ROOT,'.'+(pathname==='/'?'/index.html':pathname));
+ if(target!==ROOT&&!target.startsWith(ROOT+path.sep)){res.writeHead(403);return res.end('Forbidden');}
+ fs.readFile(target,(err,data)=>{if(err){res.writeHead(404);return res.end('Not found');}res.writeHead(200,{'Content-Type':mime[path.extname(target)]||'application/octet-stream','Cache-Control':'no-cache'});res.end(data);});
+});
+const wss=new WebSocket.Server({server:httpServer,maxPayload:2048});
+const ALPHABET='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function code(){let v;do{v=Array.from({length:5},()=>ALPHABET[Math.floor(Math.random()*ALPHABET.length)]).join('');}while(rooms.has(v));return v;}
+function send(ws,obj){if(ws.readyState===WebSocket.OPEN)try{ws.send(JSON.stringify(obj));}catch{}}
+function emit(room,obj){for(const c of room.clients)send(c,obj);}
+function error(ws,msg){send(ws,{type:'error',message:msg});}
+function sanitize(s){return String(s??'').replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,18);}
+function lobbyState(room){return {type:'lobby',code:room.code,capacity:room.capacity,name:room.name,state:room.status,hostId:room.members[0]?.id??null,players:room.members.map(p=>({id:p.id,name:p.name,char:p.char,slot:p.slot,clientId:p.clientId}))};}
+function lobby(room){emit(room,lobbyState(room));}
+function leave(ws){
+ const room=ws.room;if(!room)return;
+ room.clients.delete(ws);
+ room.members=room.members.filter(p=>p.ws!==ws);
+ ws.room=null;ws.members=[];
+ if(room.members.length===0){rooms.delete(room.code);return;}
+ if(room.status==='playing' && room.match){
+   const ids=new Set(room.members.map(p=>p.id));
+   for(const p of room.match.players)if(!ids.has(p.id))E.eliminate(p,'disconnect');
+ }
+ lobby(room);
+}
+function validateNames(msg){const names=Array.isArray(msg.names)?msg.names:[];if(names.length<1||names.length>2)return null;const clean=names.map(sanitize);return clean.every(Boolean)?clean:null;}
+function join(ws,msg,creating){
+ if(ws.room)return error(ws,'Primero salí de tu sala actual.');
+ const names=validateNames(msg);if(!names)return error(ws,'Ingresá un apodo para cada jugador (máximo dos por dispositivo).');
+ let room;
+ if(creating){
+  const capacity=Math.floor(+msg.capacity);
+  if(!Number.isInteger(capacity)||capacity<1||capacity>12)return error(ws,'La sala debe admitir entre 1 y 12 personas.');
+  if(names.length>capacity)return error(ws,'La sala no tiene lugar para los dos jugadores de esta PC.');
+  room={code:code(),capacity,name:sanitize(msg.roomName)||'Circuito Neón',members:[],clients:new Set(),status:'lobby',match:null,round:0,lastBroadcast:0};
+  rooms.set(room.code,room);
+ }else{
+  room=rooms.get(String(msg.code||'').trim().toUpperCase());
+  if(!room)return error(ws,'Código incorrecto o sala inexistente.');
+  if(room.status!=='lobby')return error(ws,'La carrera ya comenzó.');
+  if(room.members.length+names.length>room.capacity)return error(ws,'No hay suficientes lugares libres en la sala.');
+ }
+ const clientId=uid++;ws.members=[];ws.room=room;room.clients.add(ws);
+ names.forEach((name,slot)=>{const p={id:uid++,name,char:null,slot,clientId,ws};room.members.push(p);ws.members.push(p);});
+ send(ws,{type:'joined',code:room.code,ids:ws.members.map(p=>p.id)});lobby(room);
+}
+function select(ws,msg){
+ const room=ws.room;if(!room||room.status!=='lobby')return;
+ const player=ws.members.find(p=>p.id===msg.id);if(!player)return;
+ const char=msg.char===null?null:Number(msg.char);
+ if(char!==null&&(!Number.isInteger(char)||char<0||char>=12))return error(ws,'Personaje inválido.');
+ if(char!==null&&room.members.some(p=>p.char===char&&p!==player))return error(ws,'El personaje fue seleccionado antes por otro jugador.');
+ player.char=char;
+ lobby(room); // changing a pick releases its previous character immediately
+}
+function start(ws){
+ const room=ws.room;
+ if(!room||room.status!=='lobby'||room.members[0]?.ws!==ws)return error(ws,'Solo el anfitrión puede iniciar la carrera.');
+ const available=E.NAMES.map((_,i)=>i).filter(i=>!room.members.some(p=>p.char===i));
+ for(const p of room.members)if(p.char===null){const pos=Math.floor(Math.random()*available.length);p.char=available.splice(pos,1)[0];}
+ room.round++;room.status='playing';room.match=E.createMatch(room.members,seed++);
+ room.lastBroadcast=0;
+ emit(room,{type:'start',code:room.code,seed:room.match.seed,players:room.members.map(p=>({id:p.id,name:p.name,char:p.char}))});
+ lobby(room);
+}
+function backToLobby(ws){const room=ws.room;if(!room||room.members[0]?.ws!==ws||room.status!=='ended')return;room.status='lobby';room.match=null;room.members.forEach(p=>p.char=null);lobby(room);}
+wss.on('connection',ws=>{
+ ws.isAlive=true;ws.members=[];ws.room=null;
+ ws.on('pong',()=>ws.isAlive=true);
+ ws.on('message',data=>{
+  let msg;try{msg=JSON.parse(data.toString());}catch{return;}
+  if(!msg||typeof msg.type!=='string')return;
+  switch(msg.type){
+   case 'create':join(ws,msg,true);break;
+   case 'join':join(ws,msg,false);break;
+   case 'pick':select(ws,msg);break;
+   case 'start':start(ws);break;
+   case 'flip':if(ws.room?.status==='playing'&&ws.members.some(p=>p.id===msg.id))E.flip(ws.room.match,msg.id);break;
+   case 'lobbyAgain':backToLobby(ws);break;
+   case 'leave':leave(ws);break;
+  }
+ });
+ ws.on('close',()=>leave(ws));ws.on('error',()=>leave(ws));
+});
+let last=performance.now(),sendTimer=0;
+setInterval(()=>{
+ const now=performance.now(),dt=Math.min(.055,(now-last)/1000);last=now;sendTimer+=dt;
+ for(const room of rooms.values())if(room.status==='playing'){
+  E.step(room.match,dt);
+  if(sendTimer>=.05)emit(room,{type:'snapshot',...E.snapshot(room.match)});
+  if(room.match.ended){room.status='ended';emit(room,{type:'ended',ranking:room.match.players.map(p=>({id:p.id,name:p.name,char:p.char,score:p.score,reason:p.reason})).sort((a,b)=>b.score-a.score)});lobby(room);}
+ }
+ if(sendTimer>=.05)sendTimer=0;
+},16);
+const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(!ws.isAlive){ws.terminate();continue;}ws.isAlive=false;ws.ping();}},30000);
+httpServer.listen(PORT,'0.0.0.0',()=>console.log('Gravity Shift 2.0 listening on '+PORT));
+process.on('SIGTERM',()=>{clearInterval(heartbeat);wss.close();httpServer.close(()=>process.exit(0));});
